@@ -9,7 +9,7 @@ from copy import copy, deepcopy
 from functools import wraps
 from pprint import pformat
 
-from cerberus.platform import MutableMapping
+from cerberus.platform import _str_type, Mapping, MutableMapping, Sequence
 from cerberus.utils import compare_paths_lt, quote_string
 
 ErrorDefinition = namedtuple('ErrorDefinition', 'code, rule')
@@ -79,6 +79,65 @@ ANYOF = ErrorDefinition(0x93, 'anyof')
 ALLOF = ErrorDefinition(0x94, 'allof')
 
 
+""" Reference resolution """
+
+REF_KEY = '$ref'
+"""The key that marks a mapping as a reference to a registry definition."""
+
+
+def is_reference(value):
+    """Returns ``True`` if the value is a reference to a registry definition."""
+    return (
+        isinstance(value, Mapping)
+        and len(value) == 1
+        and isinstance(value.get(REF_KEY), _str_type)
+    )
+
+
+def resolve_references(value, registries, _seen=()):
+    """
+    Resolves references (mappings of the shape ``{'$ref': name}``) against the
+    given registries, which are consulted in order. References nested in
+    definitions are resolved as well.
+
+    Returns a tuple of the result and a boolean that indicates whether all
+    encountered references could be resolved. References that cannot be
+    resolved - because the name is unknown or the resolution would be cyclic -
+    are kept as they are.
+    """
+    if is_reference(value):
+        name = value[REF_KEY]
+        if name in _seen:
+            return value, False
+        definition = None
+        for registry in registries:
+            definition = registry.get(name)
+            if definition is not None:
+                break
+        if definition is None:
+            return value, False
+        return resolve_references(definition, registries, _seen + (name,))
+    elif isinstance(value, Mapping):
+        resolved = {}
+        all_resolved = True
+        for key, item in value.items():
+            resolved[key], item_resolved = resolve_references(item, registries, _seen)
+            all_resolved = all_resolved and item_resolved
+        return resolved, all_resolved
+    elif isinstance(value, Sequence) and not isinstance(value, (_str_type, bytes)):
+        resolved = []
+        all_resolved = True
+        for item in value:
+            resolved_item, item_resolved = resolve_references(
+                item, registries, _seen
+            )
+            resolved.append(resolved_item)
+            all_resolved = all_resolved and item_resolved
+        return type(value)(resolved), all_resolved
+    else:
+        return value, True
+
+
 """ SchemaError messages """
 
 SCHEMA_ERROR_DEFINITION_TYPE = "schema definition for field '{0}' must be a dict"
@@ -91,7 +150,17 @@ SCHEMA_ERROR_MISSING = "validation schema missing"
 class ValidationError(object):
     """A simple class to store and query basic error information."""
 
-    def __init__(self, document_path, schema_path, code, rule, constraint, value, info):
+    def __init__(
+        self,
+        document_path,
+        schema_path,
+        code,
+        rule,
+        constraint,
+        value,
+        info,
+        registries=(),
+    ):
         self.document_path = document_path
         """ The path to the field within the document that caused the error.
             Type: :class:`tuple` """
@@ -103,12 +172,43 @@ class ValidationError(object):
         self.rule = rule
         """ The rule that failed. Type: `string` """
         self.constraint = constraint
-        """ The constraint that failed. """
+        """
+        The constraint that failed. If the constraint is a reference of the shape
+        ``{'$ref': name}`` and registries were assigned to the error, it is lazily
+        resolved against them when accessed. References that cannot be resolved
+        are returned unchanged; check :attr:`constraint_resolved` to distinguish
+        those cases.
+        """
         self.value = value
         """ The value that failed. """
         self.info = info
         """ May hold additional information about the error.
             Type: :class:`tuple` """
+        self.registries = registries
+        """ The registries used to resolve references of the constraint. """
+
+    @property
+    def constraint(self):
+        return self._resolve_constraint()[0]
+
+    @constraint.setter
+    def constraint(self, value):
+        self._constraint = value
+
+    @property
+    def constraint_resolved(self):
+        """
+        ``True`` if the constraint is not an unresolved reference. Returns ``False``
+        when a reference could not be resolved (it is missing from the registries or
+        resolving it would be cyclic); in that case :attr:`constraint` keeps the
+        original reference.
+        """
+        return self._resolve_constraint()[1]
+
+    def _resolve_constraint(self):
+        if self.registries and is_reference(self._constraint):
+            return resolve_references(self._constraint, self.registries)
+        return self._constraint, True
 
     def __eq__(self, other):
         """Assumes the errors relate to the same document and schema."""

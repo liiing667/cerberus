@@ -1,12 +1,26 @@
 # -*- coding: utf-8 -*-
 
-from cerberus import schema_registry, rules_set_registry, Validator
+from cerberus import errors, schema_registry, rules_set_registry, Validator
 from cerberus.tests import (
     assert_fail,
     assert_normalized,
     assert_schema_error,
     assert_success,
 )
+
+
+REF_GUARD_FAILED = errors.ErrorDefinition(0x0F, 'ref_guard')
+
+
+class RefGuardErrorHandler(errors.BasicErrorHandler):
+    messages = errors.BasicErrorHandler.messages.copy()
+    messages[REF_GUARD_FAILED.code] = 'ref guard failed'
+
+
+class RefConstraintValidator(Validator):
+    def _validate_ref_guard(self, constraint, field, value):
+        """{'type': 'dict'}"""
+        self._error(field, REF_GUARD_FAILED)
 
 
 def test_schema_registry_simple():
@@ -82,3 +96,67 @@ def test_rules_set_with_dict_field():
 
     rules_set_registry.add('rule', {'type': 'integer'})
     assert_success(document, schema)
+
+
+def test_error_constraint_resolves_nested_registry_references():
+    rules_set_registry.add(
+        'ref_leaf', {'type': 'integer', 'allowed': [1, 2, 3]}
+    )
+    rules_set_registry.add(
+        'ref_inner', {'$ref': 'ref_leaf'}
+    )
+    rules_set_registry.add(
+        'ref_outer',
+        {'type': 'dict', 'valuesrules': {'$ref': 'ref_inner'}},
+    )
+
+    document = {'a_field': {'x': 'one'}}
+    schema = {'a_field': {'ref_guard': {'$ref': 'ref_outer'}}}
+    error = assert_fail(document, schema, RefConstraintValidator())
+
+    assert error[0].constraint == {
+        'type': 'dict',
+        'valuesrules': {'type': 'integer', 'allowed': [1, 2, 3]},
+    }
+    assert error[0].constraint_resolved is True
+    # the original reference is preserved on the error
+    assert error[0]._constraint == {'$ref': 'ref_outer'}
+    # the other error fields stay untouched
+    assert error[0].rule == 'ref_guard'
+    assert error[0].code == REF_GUARD_FAILED.code
+    assert error[0].document_path == ('a_field',)
+    assert error[0].value == {'x': 'one'}
+    # errors() output structure keeps the custom error message
+    validator = RefConstraintValidator(schema, error_handler=RefGuardErrorHandler)
+    assert not validator(document)
+    assert validator.errors == {'a_field': ['ref guard failed']}
+
+
+def test_error_constraint_keeps_missing_reference():
+    schema = {'a_field': {'ref_guard': {'$ref': 'missing_definition'}}}
+    validator = RefConstraintValidator(schema)
+    error = assert_fail({'a_field': 'x'}, validator=validator)
+
+    assert error[0].constraint == {'$ref': 'missing_definition'}
+    assert error[0].constraint_resolved is False
+
+
+def test_error_constraint_handles_reference_cycles():
+    rules_set_registry.add('ref_cycle_a', {'$ref': 'ref_cycle_b'})
+    rules_set_registry.add('ref_cycle_b', {'$ref': 'ref_cycle_a'})
+
+    schema = {'a_field': {'ref_guard': {'$ref': 'ref_cycle_a'}}}
+    validator = RefConstraintValidator(schema)
+    error = assert_fail({'a_field': 'x'}, validator=validator)
+
+    assert error[0].constraint == {'$ref': 'ref_cycle_a'}
+    assert error[0].constraint_resolved is False
+
+
+def test_error_constraint_without_reference_is_unchanged():
+    error = assert_fail(
+        {'a_field': 'one'},
+        {'a_field': {'type': 'integer'}},
+    )
+    assert error[0].constraint == 'integer'
+    assert error[0].constraint_resolved is True

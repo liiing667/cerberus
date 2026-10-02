@@ -308,7 +308,14 @@ class BareValidator(object):
             value = self.document.get(field)
 
             self.recent_error = errors.ValidationError(
-                document_path, schema_path, code, rule, constraint, value, info
+                document_path,
+                schema_path,
+                code,
+                rule,
+                constraint,
+                value,
+                info,
+                (self.rules_set_registry, self.schema_registry),
             )
             self._error([self.recent_error])
 
