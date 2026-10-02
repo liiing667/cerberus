@@ -109,6 +109,9 @@ class ValidationError(object):
         self.info = info
         """ May hold additional information about the error.
             Type: :class:`tuple` """
+        self.unresolved_refs = ()
+        """ The names of registry references in the constraint that could not
+            be resolved. Type: :class:`tuple` """
 
     def __eq__(self, other):
         """Assumes the errors relate to the same document and schema."""

@@ -21,6 +21,7 @@ from cerberus.schema import (
     schema_registry,
     rules_set_registry,
     DefinitionSchema,
+    resolve_registry_refs,
     SchemaError,
 )
 from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDefinition
@@ -307,9 +308,17 @@ class BareValidator(object):
 
             value = self.document.get(field)
 
+            if isinstance(constraint, (Mapping, list, tuple)):
+                constraint, unresolved_refs = resolve_registry_refs(
+                    constraint, self.rules_set_registry, self.schema_registry
+                )
+            else:
+                unresolved_refs = ()
+
             self.recent_error = errors.ValidationError(
                 document_path, schema_path, code, rule, constraint, value, info
             )
+            self.recent_error.unresolved_refs = unresolved_refs
             self._error([self.recent_error])
 
     def _get_child_validator(self, document_crumb=None, schema_crumb=None, **kwargs):

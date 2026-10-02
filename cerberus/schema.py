@@ -552,3 +552,66 @@ class RulesSetRegistry(Registry):
 
 
 schema_registry, rules_set_registry = SchemaRegistry(), RulesSetRegistry()
+
+
+def resolve_registry_refs(value, rules_set_registry, schema_registry):
+    """
+    Resolves ``{'$ref': name}`` markers in a possibly nested constraint against
+    the given registries. References in resolved definitions are resolved
+    recursively as well.
+
+    References that cannot be resolved - either because the referenced name is
+    not registered or because the reference is part of a reference cycle - are
+    kept as-is in the result, and their names are reported.
+
+    :param value: The constraint to resolve references in.
+    :param rules_set_registry: The registry that is consulted first.
+    :type rules_set_registry: :class:`Registry`
+    :param schema_registry: The registry that is consulted when a reference
+                            cannot be found in the rules set registry.
+    :type schema_registry: :class:`Registry`
+    :return: A tuple of the resolved constraint and a tuple with the names of
+             the references that could not be resolved.
+    """
+    unresolved = []
+    resolved_refs = {}
+    resolving = set()
+
+    def lookup(name):
+        result = rules_set_registry.get(name)
+        if result is None:
+            result = schema_registry.get(name)
+        return result
+
+    def mark_unresolved(name):
+        if name not in unresolved:
+            unresolved.append(name)
+
+    def resolve(node):
+        if isinstance(node, Mapping):
+            ref = node.get('$ref')
+            if isinstance(ref, _str_type):
+                return resolve_ref(ref)
+            return dict((key, resolve(item)) for key, item in node.items())
+        elif isinstance(node, (list, tuple)):
+            result = [resolve(item) for item in node]
+            return tuple(result) if isinstance(node, tuple) else result
+        else:
+            return node
+
+    def resolve_ref(name):
+        if name in resolved_refs:
+            return resolved_refs[name]
+        if name in resolving:
+            mark_unresolved(name)
+            return {'$ref': name}
+        definition = lookup(name)
+        if definition is None:
+            mark_unresolved(name)
+            return {'$ref': name}
+        resolving.add(name)
+        resolved_refs[name] = resolve(definition)
+        resolving.discard(name)
+        return resolved_refs[name]
+
+    return resolve(value), tuple(unresolved)

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from cerberus import schema_registry, rules_set_registry, Validator
+from cerberus import schema_registry, rules_set_registry, Validator, errors
 from cerberus.tests import (
     assert_fail,
     assert_normalized,
@@ -82,3 +82,60 @@ def test_rules_set_with_dict_field():
 
     rules_set_registry.add('rule', {'type': 'integer'})
     assert_success(document, schema)
+
+
+class RefConstraintValidator(Validator):
+    MULTIPLE_OF = errors.ErrorDefinition(0x100, 'multiple_of')
+
+    def _validate_multiple_of(self, constraint, field, value):
+        """{'type': 'dict'}"""
+        if not isinstance(value, int) or value % 2:
+            self._error(field, self.MULTIPLE_OF)
+
+
+def test_error_constraint_resolves_nested_references():
+    rules_set_registry.extend(
+        (
+            ('constraint_ref_base', {'multiple_of': 3}),
+            ('constraint_ref_wrapper', {'inner': {'$ref': 'constraint_ref_base'}}),
+            ('constraint_ref_top', {'$ref': 'constraint_ref_wrapper'}),
+        )
+    )
+
+    schema = {'foo': {'multiple_of': {'$ref': 'constraint_ref_top'}}}
+    validator = RefConstraintValidator(schema)
+
+    assert not validator({'foo': 5})
+
+    error = validator._errors[0]
+    assert error.constraint == {'inner': {'multiple_of': 3}}
+    assert error.unresolved_refs == ()
+
+
+def test_error_constraint_keeps_missing_reference():
+    schema = {'foo': {'multiple_of': {'$ref': 'constraint_ref_missing'}}}
+    validator = RefConstraintValidator(schema)
+
+    assert not validator({'foo': 5})
+
+    error = validator._errors[0]
+    assert error.constraint == {'$ref': 'constraint_ref_missing'}
+    assert error.unresolved_refs == ('constraint_ref_missing',)
+
+
+def test_error_constraint_reference_cycle():
+    rules_set_registry.extend(
+        (
+            ('constraint_ref_cycle_a', {'$ref': 'constraint_ref_cycle_b'}),
+            ('constraint_ref_cycle_b', {'$ref': 'constraint_ref_cycle_a'}),
+        )
+    )
+
+    schema = {'foo': {'multiple_of': {'$ref': 'constraint_ref_cycle_a'}}}
+    validator = RefConstraintValidator(schema)
+
+    assert not validator({'foo': 5})
+
+    error = validator._errors[0]
+    assert error.constraint == {'$ref': 'constraint_ref_cycle_a'}
+    assert error.unresolved_refs == ('constraint_ref_cycle_a',)
